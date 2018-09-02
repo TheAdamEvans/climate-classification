@@ -11,16 +11,17 @@ def download_year_data(year):
     # download from NOAA
     call(["wget"]+url+['-O']+[tarball]+['-c'])
 
-    # # uncompress
-    # call(['mkdir',f'./data/{year}'])
-    # call(['tar','-xzf',tarball,'-C',f'./data/{year}'])
+    # uncompress
+    call(['mkdir',f'./data/{year}'])
+    call(['tar','-xzf',tarball,'-C',f'./data/{year}'])
 
-    # # clean up
-    # call(['rm',tarball])
+    # clean up
+    call(['rm',tarball])
 
 
 if len(sys.argv) < 2:
     for year in range(1973, 2000):
         download_year_data(year)
 else:
+    # TODO make data folder if it doesn't exist
     download_year_data(sys.argv[1])
