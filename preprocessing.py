@@ -8,10 +8,6 @@ import re
 import os
 import sys
 
-# steps to download data
-# wget --header="Host: www.ncei.noaa.gov" --header="Connection: keep-alive" "https://www.ncei.noaa.gov/data/global-hourly/archive/1901.tar.gz" -O "1901.tar.gz" -c
-# mkdir 1901 && tar -xzf 1901.tar.gz -C 1901
-# rm 1901.tar.gz
 
 def see_maps_location(lat, lon):
     print(f'https://www.google.com.au/maps/search/{lat},{lon}')
@@ -126,66 +122,91 @@ def add_datepart(df, fldname, drop=True, time=False):
     if drop: df.drop(fldname, axis=1, inplace=True)
 
 
-def save_station_data(d, slim, path):
+def save_station_data(metadata, slim, path):
 
     # denormalized features of this station.. anything that could be interesting
-    d['num_obs'] = slim.shape[0]
-    d['num_on_the_hour_obs'] = (slim['Minute']==0).sum()
-    if d['num_obs'][0] > 8000:
-        print(d.to_csv(None, header=False, index=False)[:-1])
+    metadata['num_obs'] = slim.shape[0]
+    metadata['num_on_the_hour_obs'] = (slim['Minute']==0).sum()
+    
     # TODO closest city
-
-    slim.to_csv(
-        (path/f"0-{d['station'][0]}.csv"),
-        header = True, index = False
-        )
-
-    if (path/'stations.csv').is_file():
-        with open((path/'stations.csv'), 'a') as file:
-            d.to_csv(file, header=False, index=False)
+    
+    print(metadata.to_csv(None, header=False, index=False)[:-1])
+    if (path/'clean'/'stations.csv').is_file():
+        with open((path/'clean'/'stations.csv'), 'a') as file:
+            metadata.to_csv(file, header=False, index=False)
     else:
-        with open((path/'stations.csv'), 'a') as file:
-            d.to_csv(file, header=True, index=False)
+        with open((path/'clean'/'stations.csv'), 'a') as file:
+            metadata.to_csv(file, header=True, index=False)
+    
+    slim.to_feather(path/'clean'/f"{metadata['station'][0]}.feather")
+
+
+def process_station_data(df):
+    
+    df.columns = map(str.lower, df.columns)
+    
+    # merge them all together
+    wnd, ceil, vis, tmp  = split_wnd(df), split_ceil(df), split_vis(df), split_tmp(df)
+    wndf, ceilf, visf, tmpf = ['wnd_speed','wnd_direction_sin','wnd_direction_cos'], ['ceil','ceil_height'], ['vis_distance'], ['tmp']
+    add_datepart(df, 'date', drop=False, time=True)
+    timef = ['station','date','Year','Dayofyear','Hour','Minute','report_type']
+    
+    # filter columns
+    slim = pd.concat([df[timef],wnd[wndf],ceil[ceilf],vis[visf],tmp[tmpf]], axis=1)
+
+    # some stations have multiple reporting call signs, take the most frequent one
+    # slim = slim[slim['call_sign'] == slim['call_sign'].value_counts().idxmax()]
+    # remove "Airways special report" records
+    slim = slim[slim['report_type'] != 'SAOSP']
+
+    metadata = df[['station','latitude','longitude','elevation','name']].head(1)
+    
+    return metadata, slim
+
+
+def get_complete_station_years(path):
+
+    station_years = pd.DataFrame()
+    years = os.listdir(path/'raw')
+
+    for y in years:
+
+        this_station_year = pd.DataFrame.from_dict({
+            'id':[s[:-4] for s in os.listdir(path/'raw'/f'{y}')],
+            'year':y
+        })
+
+        station_years = pd.concat([station_years, this_station_year])
+
+    files_per_station = station_years['id'].value_counts()
+    stations_with_complete_history = files_per_station==len(station_years['year'].unique())
+    is_complete_station_year = station_years['id'].isin(files_per_station[stations_with_complete_history].index)
+    complete_station_years = station_years[is_complete_station_year].sort_values(['id','year'])
+    # TODO drop station 99999999999
+    complete_station_years.reset_index(inplace=True, drop=True)
+    stations = complete_station_years['id'].unique()
+    return stations, complete_station_years
 
 
 if __name__ == '__main__':
 
-    if len(sys.argv) < 2:
-        raise ValueError('No year!')
-    else:
-        year = int(sys.argv[1])
+    path = Path(f'/home/ubuntu/climate-classification/data')
+    stations, station_years = get_complete_station_years(path)
 
-    path = Path(f'./data/{year}')
-    station_files = [p for p in os.listdir(path) if not (p.startswith('0-') or p=='stations.csv')]
+    for station in stations:
 
+        years = station_years['year'][station_years['id']==station]
 
-    for file in station_files:
+        station_data = pd.DataFrame()
+        for year in years:
+            this_year = pd.read_csv(
+                path/'raw'/f'{year}'/f'{station}.csv',
+                parse_dates=['DATE'],
+                low_memory=False,
+            )
+            station_data = pd.concat([station_data, this_year], sort=True)
+            station_data.reset_index(inplace=True, drop=True)
 
-        df = pd.read_csv(
-            path/f'{file}',
-            parse_dates=['DATE'],
-            low_memory=False,
-        )
-        df.columns = map(str.lower, df.columns)
+        metadata, cleaned_data = process_station_data(station_data)
 
-        if df.shape[0] < (3 * 365):
-            # skip stations with too little data
-            pass
-        else:
-            # merge them all together
-            wnd, ceil, vis, tmp  = split_wnd(df), split_ceil(df), split_vis(df), split_tmp(df)
-            wndf, ceilf, visf, tmpf = ['wnd_speed','wnd_direction_sin','wnd_direction_cos'], ['ceil','ceil_height'], ['vis_distance'], ['tmp']
-            add_datepart(df, 'date', drop=False, time=True)
-            timef = ['station','date','Year','Dayofyear','Hour','Minute','call_sign','report_type']
-
-            # filter columns
-            slim = pd.concat([df[timef],wnd[wndf],ceil[ceilf],vis[visf],tmp[tmpf]], axis=1)
-
-            # some stations have multiple reporting call signs, take the most frequent one
-            slim = slim[slim['call_sign'] == slim['call_sign'].value_counts().idxmax()]
-            # remove "Airways special report" records
-            slim = slim[slim['report_type'] != 'SAOSP']
-
-            metadata = df[['station','latitude','longitude','elevation','name']].head(1)
-            save_station_data(metadata, slim, path)
-
+        save_station_data(metadata, cleaned_data, path)
