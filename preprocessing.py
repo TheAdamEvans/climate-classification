@@ -144,8 +144,13 @@ def process_station_data(df):
 
     # some stations have multiple reporting call signs, take the most frequent one
     # slim = slim[slim['call_sign'] == slim['call_sign'].value_counts().idxmax()]
-    # remove "Airways special report" records
+    # remove "Airways special report" records, 'SY-SA' records
     slim = slim[slim['report_type'] != 'SAOSP']
+    # slim = slim[slim['report_type'] != 'SY-SA']
+    # slim = slim[slim['report_type'] != 'MEXIC']
+
+    # remove duplicated records by time
+    slim = slim[~slim.date.duplicated()]
     
     slim.drop(['report_type'], axis=1, inplace=True)
 
@@ -189,16 +194,17 @@ def interpolate_measurements(station_data):
     base = pd.DataFrame(
         index = pd.date_range(
             start=str(min(station_data.date).year), end=str(max(station_data.date).year+1),
-            freq='H', closed='left',
+            freq='H', closed='left'
         )
     )
     df = pd.merge(base, station_data, how='left', left_index=True, right_index=True)
+    df['date'] = df.index.values
     df['tmp'] = df['tmp'].interpolate(method='time', limit_direction='both')
     
     return df
 
 
-def get_all_station_data(station, years):
+def get_all_station_data(path, station, years):
     """
     Sift through all the years with this station included, read the data, clean it
     """
@@ -215,13 +221,14 @@ def get_all_station_data(station, years):
                      'ELEVATION','NAME','REPORT_TYPE',
                      'TMP',
                     ],
-            dtype={'STATION': 'category', 'LATITUDE': np.float32,'LONGITUDE': np.float32,
+            dtype={'STATION': 'object', 'LATITUDE': np.float32,'LONGITUDE': np.float32,
                    'ELEVATION': np.float32, 'NAME': str, 'REPORT_TYPE':str,
                    'TMP': str,
                   },
         )
 
         metadata, cleaned_data = process_station_data(this_year)
+        cleaned_data['year'] = year
         station_dfs.append(cleaned_data)
 
     station_data = pd.concat(station_dfs)
@@ -229,9 +236,16 @@ def get_all_station_data(station, years):
     # time series interpolation only works with datetime index
     station_data.set_index('date', inplace=True, drop=False)
     station_data = interpolate_measurements(station_data)
+    station_data.station = station
     station_data.reset_index(inplace=True, drop=True)
-
+    
     return metadata, station_data
+
+
+def join_df(left, right, left_on, right_on=None, suffix='_y'):
+    if right_on is None: right_on = left_on
+    return left.merge(right, how='left', left_on=left_on, right_on=right_on, 
+                      suffixes=("", suffix))
 
 
 def save_station_data(metadata, slim, path):
@@ -240,7 +254,13 @@ def save_station_data(metadata, slim, path):
     """
 
     # denormalized features of this station.. anything that could be interesting
-    metadata['num_obs'] = slim.shape[0]
+    # metadata['num_obs'] = slim.shape[0]
+    import pdb
+    pdb.set_trace()
+    
+    if min(slim.groupby('year').count()['tmp'], default=0) < (3 * 365):
+        print(f"{metadata.station[0]} didn't have enough data")
+        return
     #metadata['num_on_the_hour_obs'] = (slim['Minute']==0).sum()
     
     # TODO closest city
@@ -256,18 +276,61 @@ def save_station_data(metadata, slim, path):
 
 if __name__ == '__main__':
 
-    path = Path(f'/home/ubuntu/climate-classification/data')
-    stations, station_years = get_complete_station_years(path)
-
-    if (path/'clean').exists():
-        shutil.rmtree((path/'clean'))
-    (path/'clean').mkdir()
+    PATH = f'/home/ubuntu/climate-classification/data'
+    stations, station_years = get_complete_station_years(Path(PATH))
 
     print(f'THERE ARE {len(stations)} STATIONS')
-    np.random.shuffle(stations)
+
+    sample_size = 15
+    
     c=0
-    for station in stations:
+    dfs = list()
+    metas = list()
+    for station in stations[0:sample_size]:
         years = station_years['year'][station_years['id']==station]
-        metadata, station_data = get_all_station_data(station, years)
-        c+=1; print(f'{c} - '+metadata.to_csv(None, header=False, index=False)[:-1])
-        save_station_data(metadata, station_data, path)
+
+        metadata, station_data = get_all_station_data(Path(PATH), station, years)
+
+        if station_data['year'].notnull().sum() < (len(years) * 366 * 3):
+            print(f"Station {station} was too small with only {station_data['year'].notnull().sum()} rows")
+        else:
+            c+=1; print(f'{c} - '+metadata.to_csv(None, header=False, index=False)[:-1])
+
+            dfs.append(station_data)
+            metas.append(metadata)
+
+    df = pd.concat(dfs)
+    metadata = pd.concat(metas)
+    df.station = df.station.astype('category')
+    df.reset_index(drop=True, inplace=True)
+
+    df = df.drop(['year'],axis=1)
+
+    metadata = pd.concat(metas)
+    metadata.station = metadata.station.astype('category')
+    metadata.reset_index(drop=True, inplace=True)
+
+    # join in other metadata here
+    # TODO closest city
+    weather = join_df(df, metadata, "station")
+
+    stats = pd.DataFrame()
+    stats['mean_temp'] = weather.groupby('station').mean()['tmp']
+    stats.reset_index(inplace=True)
+    join_df(metadata,stats,'station')
+
+    percent_holdout = 0.4
+    metadata['test_set'] = np.random.uniform(size=metadata.shape[0]) < percent_holdout
+    heldout_stations = metadata[metadata['test_set']].station
+
+    joined = df[df.station.apply(lambda m: m not in heldout_stations.values)]
+    joined_test = df[df.station.apply(lambda m: m in heldout_stations.values)]
+
+    for df in (joined, joined_test):
+        df.reset_index(drop=True, inplace=True)
+    
+    import pdb
+    pdb.set_trace()
+
+    joined.to_feather(f'{PATH}joined')
+    joined_test.to_feather(f'{PATH}joined_test')
