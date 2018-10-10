@@ -255,8 +255,6 @@ def save_station_data(metadata, slim, path):
 
     # denormalized features of this station.. anything that could be interesting
     # metadata['num_obs'] = slim.shape[0]
-    import pdb
-    pdb.set_trace()
     
     if min(slim.groupby('year').count()['tmp'], default=0) < (3 * 365):
         print(f"{metadata.station[0]} didn't have enough data")
@@ -274,14 +272,52 @@ def save_station_data(metadata, slim, path):
     slim.to_feather(path/'clean'/f"{metadata['station'][0]}.feather")
 
 
+def find_signature(m, years, samples_per_day = 24, days_per_year = 365):
+    """
+    Takes weather observations over time
+    Returns a frequency spectrum in the range 0 - 366 Hz
+    """
+    r = np.random.randint(0,m.shape[0]-(years * (days_per_year*samples_per_day)))
+    subset = m[r:r+(years*(days_per_year*samples_per_day))]
+    freqs = np.fft.fftfreq((years*(days_per_year*samples_per_day)), 1/(days_per_year*samples_per_day) )
+    
+    # these are the actuals
+    # plt.plot(subset.date, subset.tmp, 'k')
+    
+    fft = np.fft.fft(subset.tmp)
+    fft_filtered = fft.copy()
+    
+    # we lose a information like this, mainly smoothing over outliers
+    high_non_integer_frequencies = (np.abs(freqs) > days_per_year + 1) | (np.abs(freqs) % 1 != 0)
+    fft_filtered[high_non_integer_frequencies] = 0
+    
+    # okay to filter these because the information is symmetric
+    # take the negative frequency with the complex conjugate to reconstruct the original signal
+    unnatural_frequencies = high_non_integer_frequencies | (freqs < 0)
+    signature = pd.Series(fft_filtered[~unnatural_frequencies], index = freqs[~unnatural_frequencies])
+    signature.loc['start_date'] = min(subset.date)
+    signature.loc['end_date'] = max(subset.date)
+    return signature
+
+
+def bootstrap_signatures(m, samples):
+    sigs = list()
+    for s in range(samples):
+        signature = find_signature(m, years=1)
+        sigs.append(signature)
+    return pd.concat(sigs,axis=1).T
+
+
 if __name__ == '__main__':
 
     PATH = f'/home/ubuntu/climate-classification/data'
     stations, station_years = get_complete_station_years(Path(PATH))
+    np.random.shuffle(stations)
 
     print(f'THERE ARE {len(stations)} STATIONS')
 
-    sample_size = 15
+    sample_size = 20
+    bootstrap_samples = 10
     
     c=0
     dfs = list()
@@ -309,6 +345,7 @@ if __name__ == '__main__':
     metadata = pd.concat(metas)
     metadata.station = metadata.station.astype('category')
     metadata.reset_index(drop=True, inplace=True)
+    metadata.name = metadata.name.astype('category')
 
     # join in other metadata here
     # TODO closest city
@@ -318,19 +355,40 @@ if __name__ == '__main__':
     stats['mean_temp'] = weather.groupby('station').mean()['tmp']
     stats.reset_index(inplace=True)
     join_df(metadata,stats,'station')
-
-    percent_holdout = 0.4
-    metadata['test_set'] = np.random.uniform(size=metadata.shape[0]) < percent_holdout
-    heldout_stations = metadata[metadata['test_set']].station
-
-    joined = df[df.station.apply(lambda m: m not in heldout_stations.values)]
-    joined_test = df[df.station.apply(lambda m: m in heldout_stations.values)]
-
-    for df in (joined, joined_test):
-        df.reset_index(drop=True, inplace=True)
     
-    import pdb
-    pdb.set_trace()
+    df.sort_values(['station','date'], inplace=True)
+    metadata.sort_values(['station'], inplace=True)
 
-    joined.to_feather(f'{PATH}joined')
-    joined_test.to_feather(f'{PATH}joined_test')
+    # for df in (joined, joined_test):
+    #     df.reset_index(drop=True, inplace=True)
+
+    df.reset_index(drop=True, inplace=True)
+    metadata.reset_index(drop=True, inplace=True)
+
+    df.to_feather(f'{PATH}/joined')
+    # joined_test.to_feather(f'{PATH}/joined_test')
+    metadata.to_feather(f'{PATH}/metadata')
+
+    df = join_df(df, metadata, 'station')
+    
+    print('Bootstrapping FFT...')
+    signatures = df.groupby('station').apply(bootstrap_signatures, samples=bootstrap_samples)
+    
+    signatures.end_date = signatures.end_date.astype('datetime64')
+    signatures.start_date = signatures.start_date.astype('datetime64')
+    signatures.reset_index(inplace=True)
+    sample_periods = signatures[['station','start_date','end_date']]
+    signatures.drop(['station','level_1','start_date','end_date'], axis=1, inplace=True)
+
+    # need to split imaginary parts into real numbers for ML algorithms
+    real_part = signatures.apply(lambda n: n.apply(np.real))
+    real_part.columns = [str(int(col)) + '_real' for col in real_part.columns]
+    imag_part = signatures.apply(lambda n: n.apply(np.imag))
+    imag_part.columns = [str(int(col)) + '_imag' for col in imag_part.columns]
+    final = pd.concat([real_part, imag_part], axis=1)
+    final.reset_index(drop=True, inplace=True)
+    final = pd.concat([sample_periods['station'], final], axis='columns')
+
+    final.to_feather(f'{PATH}/bootstrapped')
+    sample_periods.to_feather(f'{PATH}/sample_periods')
+
