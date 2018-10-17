@@ -25,7 +25,7 @@ def download_year_data(year, path = Path('./data')):
 
 
 if len(sys.argv) < 2:
-    for year in range(1973, 1980):
+    for year in range(1980, 1985):
         download_year_data(year)
 else:
     download_year_data(sys.argv[1])

@@ -1,162 +1,14 @@
+import os
+from pathlib import Path
 import pandas as pd
 import numpy as np
-import matplotlib as plt
+import math
 
-from datetime import datetime
-from pathlib import Path
-import re
-import os
-import sys
-import shutil
+from parsing import split_tmp, split_wnd, split_ceil, split_vis, split_liquid_precip, split_snow
 
 
 def see_maps_location(lat, lon):
     print(f'https://www.google.com.au/maps/search/{lat},{lon}')
-
-
-def split_wnd(df):
-    
-    unsplit = df['wnd'].str.split(',')
-    wnd_metrics = pd.DataFrame.from_dict(
-        dict(zip(df.index, unsplit)),
-        orient='index',
-        columns=[
-            'wnd_direction', # The angle, measured in a clockwise direction, between true north and the direction from which the wind is blowing.
-            'wnd_direction_code', # If type code (below) = V, then 999 indicates variable wind direction.
-            'wnd_type_code', # If a value of 9 appears with a wind speed of 0000, this indicates calm winds.
-            'wnd_speed', # meters per second. 9999 = Missing.
-            'wnd_speed_code',
-        ]
-    )
-    
-    wnd_metrics['wnd_speed'] = wnd_metrics['wnd_speed'].replace('9999', np.nan)
-    wnd_metrics['wnd_direction'] = wnd_metrics['wnd_direction'].replace('999', np.nan)
-    
-    wnd_metrics['wnd_speed'] = pd.to_numeric(wnd_metrics['wnd_speed'])
-    wnd_metrics['wnd_direction'] = pd.to_numeric(wnd_metrics['wnd_direction'])
-    wnd_metrics['wnd_direction_sin'] = np.sin(np.deg2rad(wnd_metrics['wnd_direction']))
-    wnd_metrics['wnd_direction_cos'] = np.cos(np.deg2rad(wnd_metrics['wnd_direction']))
-    
-    return wnd_metrics
-
-
-def split_ceil(df):
-    
-    unsplit = df['cig'].str.split(',')
-    ceil = pd.DataFrame.from_dict(
-        dict(zip(df.index, unsplit)),
-        orient='index',
-        columns=[
-            'ceil_height', # Lowest clouds in meters. Unlimited = 22000.
-            'ceil_code', # A quality status of a reported ceiling height dimension.
-            'ceil_determination_code', # Method used to determine the ceiling.
-            'ceil_cavok', # Whether the 'Ceiling and Visibility Okay' (CAVOK) condition has been reported.
-        ]
-    )
-    
-    
-    ceil['ceil'] = ceil['ceil_height'] != '22000'
-    ceil.loc[ceil['ceil_height'] == '99999','ceil'] = np.nan
-    ceil['ceil_height'] = ceil['ceil_height'].replace(['99999','22000'], np.nan)
-    ceil['ceil_height'] = (ceil['ceil_height']).astype(float)
-    
-    ceil['ceil_code'] = ceil['ceil_code'].replace('9', np.nan)
-    ceil['ceil_determination_code'] = ceil['ceil_determination_code'].replace('9', np.nan)
-    
-    return ceil
-
-
-def split_vis(df):
-    unsplit = df['vis'].str.split(',')
-    vis = pd.DataFrame.from_dict(
-        dict(zip(df.index, unsplit)),
-        orient='index',
-        columns=[
-            'vis_distance',  # Horizontal distance (in meters) at which an object can be seen and identified. # Missing = 999999. NOTE: Values greater than 160000 are entered as 160000.
-            'vis_code', # Quality status.
-            'vis_variability', # Denotes whether or not the reported visibility is variable. 9 = Missing.
-            'vis_variability_code',
-        ]
-    )
-    
-    vis['vis_distance'] = vis['vis_distance'].replace('999999', np.nan)
-    vis['vis_distance'] = pd.to_numeric(vis['vis_distance'])
-    vis['vis_variability'] = (vis['vis_variability'] == 'V').astype(float)
-    
-    return vis
-
-
-def split_tmp(df):
-    unsplit = df['tmp'].str.split(',')
-    tmp = pd.DataFrame.from_dict(
-        dict(zip(df.index, unsplit)),
-        orient='index',
-        columns=[
-            'tmp', # temps are in celsius, scaled up by 10
-            'tmp_code',
-        ]
-    )
-
-    nan = tmp['tmp'].apply(lambda t: np.nan if t=='+9999' else 1.0)
-    sign = tmp['tmp'].apply(lambda t: 1.0 if t[0]=='+' else -1.0)
-    value = tmp['tmp'].apply(lambda t: t[1:]).astype(float) / 10
-    tmp['tmp'] = (nan * sign * value).astype('float32')
-    
-    return tmp
-
-
-def add_datepart(df, fldname, drop=True, time=False):
-    # straight from https://github.com/fastai/fastai/blob/master/fastai/structured.py#L76-L120
-    fld = df[fldname]
-    fld_dtype = fld.dtype
-    if isinstance(fld_dtype, pd.core.dtypes.dtypes.DatetimeTZDtype):
-        fld_dtype = np.datetime64
-
-    if not np.issubdtype(fld_dtype, np.datetime64):
-        df[fldname] = fld = pd.to_datetime(fld, infer_datetime_format=True)
-    targ_pre = re.sub('[Dd]ate$', '', fldname)
-    attr = ['Year', 'Month', 'Week', 'Day', 'Dayofweek', 'Dayofyear',
-            'Is_month_end', 'Is_month_start', 'Is_quarter_end', 'Is_quarter_start', 'Is_year_end', 'Is_year_start']
-    if time: attr = attr + ['Hour', 'Minute', 'Second']
-    for n in attr: df[targ_pre + n] = getattr(fld.dt, n.lower())
-    df[targ_pre + 'Elapsed'] = fld.astype(np.int64) // 10 ** 9
-    if drop: df.drop(fldname, axis=1, inplace=True)
-
-
-def process_station_data(df):
-    """
-    Map the raw data from weather obs csv file to numeric columns in DataFrame
-    """
-    
-    df.columns = map(str.lower, df.columns)
-    
-    # merge them all together
-    tmp = split_tmp(df)
-    # wnd, ceil, vis, tmp  = split_wnd(df), split_ceil(df), split_vis(df), split_tmp(df)
-    # wndf, ceilf, visf, tmpf = ['wnd_speed','wnd_direction_sin','wnd_direction_cos'], ['ceil','ceil_height'], ['vis_distance'], ['tmp']
-    # add_datepart(df, 'date', drop=False, time=True)
-    # timef = ['station','date','Year','Dayofyear','Hour','Minute','report_type']
-    timef = ['station','date','report_type']
-    
-    # filter columns
-    slim = pd.concat([df[timef], tmp['tmp']], axis=1)
-    # slim = pd.concat([df[timef],wnd[wndf],ceil[ceilf],vis[visf],tmp[tmpf]], axis=1)
-
-    # some stations have multiple reporting call signs, take the most frequent one
-    # slim = slim[slim['call_sign'] == slim['call_sign'].value_counts().idxmax()]
-    # remove "Airways special report" records, 'SY-SA' records
-    slim = slim[slim['report_type'] != 'SAOSP']
-    # slim = slim[slim['report_type'] != 'SY-SA']
-    # slim = slim[slim['report_type'] != 'MEXIC']
-
-    # remove duplicated records by time
-    slim = slim[~slim.date.duplicated()]
-    
-    slim.drop(['report_type'], axis=1, inplace=True)
-
-    metadata = df[['station','latitude','longitude','elevation','name']].head(1)
-    
-    return metadata, slim
 
 
 def get_complete_station_years(path):
@@ -164,27 +16,99 @@ def get_complete_station_years(path):
     Figure out which stations have complete histories
 
     """
-
     station_years = pd.DataFrame()
     years = os.listdir(path/'raw')
 
     for y in years:
-
         this_station_year = pd.DataFrame.from_dict({
             'id':[s[:-4] for s in os.listdir(path/'raw'/f'{y}')],
             'year':y
         })
-
         station_years = pd.concat([station_years, this_station_year])
 
     files_per_station = station_years['id'].value_counts()
     stations_with_complete_history = files_per_station==len(station_years['year'].unique())
     is_complete_station_year = station_years['id'].isin(files_per_station[stations_with_complete_history].index)
     complete_station_years = station_years[is_complete_station_year].sort_values(['id','year'])
-    # TODO drop station 99999999999
     complete_station_years.reset_index(inplace=True, drop=True)
     stations = complete_station_years['id'].unique()
     return stations, complete_station_years
+
+
+def process_station_data(df):
+    """
+    Map the raw data from weather obs csv file to numeric columns in DataFrame
+    """
+
+    df.columns = map(str.lower, df.columns)
+
+    timef = ['station','date','report_type']
+    
+    # parse out information from each of the relevant columns
+    # data dictionary can be found at https://www.ncei.noaa.gov/data/global-hourly/doc/isd-format-document.pdf
+    wnd, ceil, vis, tmp  = split_wnd(df), split_ceil(df), split_vis(df), split_tmp(df)
+    wndf, ceilf, visf, tmpf = ['wnd_speed'], ['ceil','ceil_height'], ['vis_distance'], ['tmp']
+    rain = split_liquid_precip(df)
+    snow = split_snow(df)
+    df['total_precip'] = rain['liquid_precip_depth_dimension'] + snow['snow_equivalent_water_depth_dimension']
+    
+    slim = pd.concat([
+        df[timef],
+        tmp['tmp'],
+        rain['liquid_precip_depth_dimension'], snow['snow_equivalent_water_depth_dimension'], df['total_precip'],
+        wnd[wndf], ceil[ceilf], vis[visf],
+    ] , axis=1)
+
+    # remove "Airways special report" records, 'SY-SA' records
+    slim = slim[slim['report_type'] != 'SAOSP']
+
+    # remove duplicated records by time
+    slim = slim[~slim.date.duplicated()]
+
+    slim.drop(['report_type'], axis=1, inplace=True)
+
+    metadata = df[['station','latitude','longitude','elevation','name']].head(1)
+
+    return metadata, slim
+
+
+def get_all_station_data(path, station, years):
+    """
+    Sift through all the years with this station included, read the data, clean it
+    """
+    station_dfs = list()
+    for year in years:
+        this_year = pd.read_csv(
+            path/'raw'/f'{year}'/f'{station}.csv',
+            encoding='utf-8',
+            parse_dates=['DATE'],
+            low_memory=False,
+            dtype={'STATION': 'object', 'LATITUDE': np.float32,'LONGITUDE': np.float32,
+                   'ELEVATION': np.float32, 'NAME': str, 'REPORT_TYPE':str,
+                   'TMP': str,
+                  },
+        )
+        
+        # don't use this station if any of the years have less than two observations per day
+        if this_year.shape[0] < 365 * 2:
+            metadata, _ = process_station_data(this_year)
+        else:
+            metadata, cleaned_data = process_station_data(this_year)
+            cleaned_data['year'] = year
+            station_dfs.append(cleaned_data)
+    
+    if len(station_dfs) > 0:
+        station_data = pd.concat(station_dfs)
+
+        # time series interpolation only works with datetime index
+        station_data.set_index('date', inplace=True, drop=False)
+        station_data = interpolate_measurements(station_data)
+        station_data.station = station
+        station_data.reset_index(inplace=True, drop=True)
+    else:
+        # filter out stations with less reliable
+        station_data = None
+    return metadata, station_data
 
 
 def interpolate_measurements(station_data):
@@ -199,196 +123,152 @@ def interpolate_measurements(station_data):
     )
     df = pd.merge(base, station_data, how='left', left_index=True, right_index=True)
     df['date'] = df.index.values
+    
     df['tmp'] = df['tmp'].interpolate(method='time', limit_direction='both')
+    # avoid warning about Nan mean operation
+    if (df['vis_distance'].isnull().sum() == df['vis_distance'].shape[0]):
+        df['vis_distance'].fillna(0)
+    else:
+        df['vis_distance'] = df['vis_distance'].fillna(df['vis_distance'].median())
+    
+    df['wnd_speed'] = df['wnd_speed'].interpolate(method='time', limit_direction='both')
+    df['ceil'] = df['ceil'].fillna(0)
+    df['ceil_height'] = df['ceil_height'].fillna(0)
+    df['liquid_precip_depth_dimension'] = df['liquid_precip_depth_dimension'].fillna(0)
+    df['snow_equivalent_water_depth_dimension'] = df['snow_equivalent_water_depth_dimension'].fillna(0)
+    df['total_precip'] = df['total_precip'].fillna(0)
     
     return df
 
 
-def get_all_station_data(path, station, years):
-    """
-    Sift through all the years with this station included, read the data, clean it
-    """
-    station_dfs = list()
-    for year in years:
-        this_year = pd.read_csv(
-            path/'raw'/f'{year}'/f'{station}.csv',
-            encoding='utf-8',
-            parse_dates=['DATE'],
-            low_memory=False,
-
-            usecols=['DATE',
-                     'STATION','LATITUDE','LONGITUDE',
-                     'ELEVATION','NAME','REPORT_TYPE',
-                     'TMP',
-                    ],
-            dtype={'STATION': 'object', 'LATITUDE': np.float32,'LONGITUDE': np.float32,
-                   'ELEVATION': np.float32, 'NAME': str, 'REPORT_TYPE':str,
-                   'TMP': str,
-                  },
-        )
-
-        metadata, cleaned_data = process_station_data(this_year)
-        cleaned_data['year'] = year
-        station_dfs.append(cleaned_data)
-
-    station_data = pd.concat(station_dfs)
-
-    # time series interpolation only works with datetime index
-    station_data.set_index('date', inplace=True, drop=False)
-    station_data = interpolate_measurements(station_data)
-    station_data.station = station
-    station_data.reset_index(inplace=True, drop=True)
+def collect_data_from_csvs(PATH, sample_size=None, shuffle=True):
     
-    return metadata, station_data
-
-
-def join_df(left, right, left_on, right_on=None, suffix='_y'):
-    if right_on is None: right_on = left_on
-    return left.merge(right, how='left', left_on=left_on, right_on=right_on, 
-                      suffixes=("", suffix))
-
-
-def save_station_data(metadata, slim, path):
-    """
-    Save the cleaned data to feather format
-    """
-
-    # denormalized features of this station.. anything that could be interesting
-    # metadata['num_obs'] = slim.shape[0]
+    stations, station_years = get_complete_station_years(Path(PATH))
+    if shuffle: np.random.shuffle(stations)
     
-    if min(slim.groupby('year').count()['tmp'], default=0) < (3 * 365):
-        print(f"{metadata.station[0]} didn't have enough data")
-        return
-    #metadata['num_on_the_hour_obs'] = (slim['Minute']==0).sum()
-    
-    # TODO closest city
-    if (path/'clean'/'stations.csv').is_file():
-        with open((path/'clean'/'stations.csv'), 'a') as file:
-            metadata.to_csv(file, header=False, index=False)
+    if sample_size is not None:
+        g = int(sample_size/10)
+        if (sample_size < len(stations)):
+            station_iterator = stations[0:int(sample_size)]
     else:
-        with open((path/'clean'/'stations.csv'), 'a') as file:
-            metadata.to_csv(file, header=True, index=False)
+        g = 100
+        station_iterator = stations
     
-    slim.to_feather(path/'clean'/f"{metadata['station'][0]}.feather")
+    c=0
+    dfs = list()
+    metas = list()
+    print(f'Iterating through {len(station_iterator)} station file sets')
+    for station in station_iterator:
+        years = station_years['year'][station_years['id']==station]
+        metadata, station_data = get_all_station_data(Path(PATH), station, years)
+        
+        if station_data is None:
+            pass
+        else:
+            c+=1
+            if c % g == 0:
+                print(f'{c} - '+metadata.to_csv(None, header=False, index=False)[:-1])
+            dfs.append(station_data)
+            metas.append(metadata)
+        
+    metadata = pd.concat(metas)
+    df = pd.concat(dfs)
+    df = df.drop(['year'],axis=1)
+
+    df.station = df.station.astype('category')
+    metadata.station = metadata.station.astype('category')
+
+    # get rid of stations with missing info (already having tried to interpolate)
+    notnull_counts = df.groupby('station').apply(lambda c: c.notnull().sum())
+    legit_stations = notnull_counts[(notnull_counts.apply(min, axis=1) == notnull_counts.apply(max).max())].index
+
+    df = df[df.station.apply(lambda s: s in legit_stations)]
+    metadata = metadata[metadata.station.apply(lambda s: s in legit_stations)]
+
+    df.sort_values(['station','date'], inplace=True)
+    df.reset_index(drop=True, inplace=True)
+
+    metadata.sort_values(['station'], inplace=True)
+    metadata.reset_index(drop=True, inplace=True)
+    
+    return df, metadata
 
 
-def find_signature(m, years, samples_per_day = 24, days_per_year = 365):
+def get_city_data(PATH, metadata, pop_threshold=1e6):
+
+    print('Getting populous cities...')
+    raw_cities = pd.read_csv(PATH,
+                low_memory=False,
+                encoding='utf-8',
+                dtype={
+                    'Country':'category',
+                    'City': 'object',
+                    'AccentCity': 'object',
+                    'Region': 'category',
+                    'Population': 'float32',
+                    'Latitude': 'float32',
+                    'Longitude': 'float32',
+                })
+
+    pop = raw_cities[raw_cities.Population > pop_threshold].copy()
+    pop.sort_values('Population', ascending=False, inplace=True)
+    cities = pop[~pop[['Latitude','Longitude']].duplicated()]
+    cities.reset_index(drop=True, inplace=True)
+
+    clos = cities.apply(find_closest_station, metadata=metadata, axis=1).apply(pd.Series)
+    clos.columns=['station','closest_station_distance_km']
+    mrgd = pd.merge(cities, clos, left_index=True, right_index=True, how='left')
+    
+    return mrgd.copy()
+
+
+def distance(origin, destination):
     """
-    Takes weather observations over time
-    Returns a frequency spectrum in the range 0 - 366 Hz
+    Haversince distance from https://gist.github.com/rochacbruno/2883505
+    Returns distance in kilometers
     """
-    r = np.random.randint(0,m.shape[0]-(years * (days_per_year*samples_per_day)))
-    subset = m[r:r+(years*(days_per_year*samples_per_day))]
-    freqs = np.fft.fftfreq((years*(days_per_year*samples_per_day)), 1/(days_per_year*samples_per_day) )
-    
-    # these are the actuals
-    # plt.plot(subset.date, subset.tmp, 'k')
-    
-    fft = np.fft.fft(subset.tmp)
-    fft_filtered = fft.copy()
-    
-    # we lose a information like this, mainly smoothing over outliers
-    high_non_integer_frequencies = (np.abs(freqs) > days_per_year + 1) | (np.abs(freqs) % 1 != 0)
-    fft_filtered[high_non_integer_frequencies] = 0
-    
-    # okay to filter these because the information is symmetric
-    # take the negative frequency with the complex conjugate to reconstruct the original signal
-    unnatural_frequencies = high_non_integer_frequencies | (freqs < 0)
-    signature = pd.Series(fft_filtered[~unnatural_frequencies], index = freqs[~unnatural_frequencies])
-    signature.loc['start_date'] = min(subset.date)
-    signature.loc['end_date'] = max(subset.date)
-    return signature
+    lat1, lon1 = origin
+    lat2, lon2 = destination
+    radius = 6371 # km radius of Earth
 
+    dlat = math.radians(lat2-lat1)
+    dlon = math.radians(lon2-lon1)
+    a = math.sin(dlat/2) * math.sin(dlat/2) + math.cos(math.radians(lat1)) \
+        * math.cos(math.radians(lat2)) * math.sin(dlon/2) * math.sin(dlon/2)
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
+    d = radius * c
 
-def bootstrap_signatures(m, samples):
-    sigs = list()
-    for s in range(samples):
-        signature = find_signature(m, years=1)
-        sigs.append(signature)
-    return pd.concat(sigs,axis=1).T
+    return d
+
+def find_distance(m, coords):
+    return distance((m['latitude'], m['longitude']), coords)
+
+def find_closest_station(p, metadata):
+    coords = (p.Latitude, p.Longitude)
+    d = metadata.apply(find_distance, axis=1, coords=coords)
+    return metadata.loc[d.idxmin()].station, min(d)
 
 
 if __name__ == '__main__':
 
     PATH = f'/home/ubuntu/climate-classification/data'
-    stations, station_years = get_complete_station_years(Path(PATH))
-    np.random.shuffle(stations)
+    SAMPLE_SIZE = 4000
 
-    print(f'THERE ARE {len(stations)} STATIONS')
+    df, metadata = collect_data_from_csvs(PATH, sample_size=SAMPLE_SIZE, shuffle=True)
+    cities = get_city_data('./data/worldcitiespop.csv', metadata)
 
-    sample_size = 20
-    bootstrap_samples = 10
-    
-    c=0
-    dfs = list()
-    metas = list()
-    for station in stations[0:sample_size]:
-        years = station_years['year'][station_years['id']==station]
+    closest_cities = cities.groupby('station').apply(lambda d: d.closest_station_distance_km.idxmin())
+    ma = cities.loc[closest_cities]
+    slim = df[df.station.apply(lambda s: s in ma.station.values)].copy()
 
-        metadata, station_data = get_all_station_data(Path(PATH), station, years)
+    # need to reset categories so .groupby().apply() doesn't pick up the old ones
+    for d in (slim, ma, cities):
+        d['station'] = d['station'].astype(str).astype('category')
+        d.reset_index(drop=True, inplace=True)
 
-        if station_data['year'].notnull().sum() < (len(years) * 366 * 3):
-            print(f"Station {station} was too small with only {station_data['year'].notnull().sum()} rows")
-        else:
-            c+=1; print(f'{c} - '+metadata.to_csv(None, header=False, index=False)[:-1])
+    print('Saving...')
+    slim.to_feather(f'{PATH}/df')
+    ma.to_feather(f'{PATH}/metadata')
+    cities.to_feather(f'{PATH}/cities')
 
-            dfs.append(station_data)
-            metas.append(metadata)
-
-    df = pd.concat(dfs)
-    metadata = pd.concat(metas)
-    df.station = df.station.astype('category')
-    df.reset_index(drop=True, inplace=True)
-
-    df = df.drop(['year'],axis=1)
-
-    metadata = pd.concat(metas)
-    metadata.station = metadata.station.astype('category')
-    metadata.reset_index(drop=True, inplace=True)
-    metadata.name = metadata.name.astype('category')
-
-    # join in other metadata here
-    # TODO closest city
-    weather = join_df(df, metadata, "station")
-
-    stats = pd.DataFrame()
-    stats['mean_temp'] = weather.groupby('station').mean()['tmp']
-    stats.reset_index(inplace=True)
-    join_df(metadata,stats,'station')
-    
-    df.sort_values(['station','date'], inplace=True)
-    metadata.sort_values(['station'], inplace=True)
-
-    # for df in (joined, joined_test):
-    #     df.reset_index(drop=True, inplace=True)
-
-    df.reset_index(drop=True, inplace=True)
-    metadata.reset_index(drop=True, inplace=True)
-
-    df.to_feather(f'{PATH}/joined')
-    # joined_test.to_feather(f'{PATH}/joined_test')
-    metadata.to_feather(f'{PATH}/metadata')
-
-    df = join_df(df, metadata, 'station')
-    
-    print('Bootstrapping FFT...')
-    signatures = df.groupby('station').apply(bootstrap_signatures, samples=bootstrap_samples)
-    
-    signatures.end_date = signatures.end_date.astype('datetime64')
-    signatures.start_date = signatures.start_date.astype('datetime64')
-    signatures.reset_index(inplace=True)
-    sample_periods = signatures[['station','start_date','end_date']]
-    signatures.drop(['station','level_1','start_date','end_date'], axis=1, inplace=True)
-
-    # need to split imaginary parts into real numbers for ML algorithms
-    real_part = signatures.apply(lambda n: n.apply(np.real))
-    real_part.columns = [str(int(col)) + '_real' for col in real_part.columns]
-    imag_part = signatures.apply(lambda n: n.apply(np.imag))
-    imag_part.columns = [str(int(col)) + '_imag' for col in imag_part.columns]
-    final = pd.concat([real_part, imag_part], axis=1)
-    final.reset_index(drop=True, inplace=True)
-    final = pd.concat([sample_periods['station'], final], axis='columns')
-
-    final.to_feather(f'{PATH}/bootstrapped')
-    sample_periods.to_feather(f'{PATH}/sample_periods')
-
+    print('Finished')
